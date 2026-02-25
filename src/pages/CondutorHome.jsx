@@ -3,15 +3,13 @@ import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus, Flashlight, Loader2, Edit3 } from 'lucide-react';
 
 export default function CondutorHome() {
-  const [view, setView] = useState('HOME'); // 'HOME', 'SCANNER', 'MANUAL', 'SUCCESS', 'LOADING'
+  const [view, setView] = useState('HOME');
   const [scanResult, setScanResult] = useState(null);
   const [cameraError, setCameraError] = useState('');
   
-  // Controle do Flash/Lanterna
   const [torchEnabled, setTorchEnabled] = useState(false);
   const [hasTorchSupport, setHasTorchSupport] = useState(false);
 
-  // Formulário Manual
   const [formData, setFormData] = useState({
     odometer: '',
     fuelType: 'Gasolina',
@@ -23,12 +21,10 @@ export default function CondutorHome() {
   const scannerRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  // Desliga a câmera se o componente for desmontado
   useEffect(() => {
     return () => stopScanner();
   }, []);
 
-  // --- REDIMENSIONADOR NATIVO (Zero peso na memória RAM) ---
   const resizeImage = (file, maxEdge = 1000) => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -52,53 +48,60 @@ export default function CondutorHome() {
         
         canvas.toBlob((blob) => {
           resolve(new File([blob], "foto_leve.jpg", { type: 'image/jpeg' }));
-        }, 'image/jpeg', 0.8); // Comprime em 80% de qualidade
+        }, 'image/jpeg', 0.8);
       };
       img.onerror = reject;
     });
   };
 
-  // --- MODO 1: CÂMERA AO VIVO COM FLASH E MOLDURA AJUSTADA ---
+  // --- MODO 1: CÂMERA AO VIVO (CORREÇÃO DE SEGURANÇA E CONSTRAINTS) ---
   const startScanner = async () => {
     setView('SCANNER');
     setCameraError('');
     setTorchEnabled(false);
 
-    setTimeout(async () => {
-      try {
-        const html5QrCode = new Html5Qrcode("qr-reader");
-        scannerRef.current = html5QrCode;
+    // CRÍTICO: Execução imediata, sem setTimeout, para não acionar o bloqueio de segurança do navegador.
+    try {
+      const html5QrCode = new Html5Qrcode("qr-reader");
+      scannerRef.current = html5QrCode;
 
-        await html5QrCode.start(
-          { facingMode: "environment" },
-          {
-            fps: 15,
-            formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ],
-            // Moldura menor (~200px) ideal para focar o QR Code físico de 2,3 x 2,3 cm
-            qrbox: { width: 220, height: 220 },
-            aspectRatio: 1.0
+      await html5QrCode.start(
+        { facingMode: "environment" },
+        {
+          fps: 10,
+          formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ],
+          // O tamanho do quadrado agora se adapta à tela, mas nunca passa de 250px para garantir o foco em notas físicas pequenas
+          qrbox: (viewfinderWidth, viewfinderHeight) => {
+            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+            const boxSize = Math.min(250, Math.floor(minEdge * 0.7)); 
+            return { width: boxSize, height: boxSize };
           },
-          (decodedText) => {
-            setScanResult({ type: 'QR_LINK', value: decodedText });
-            stopScanner();
-            setView('SUCCESS');
-          },
-          () => {} 
-        );
+          aspectRatio: 1.0
+        },
+        (decodedText) => {
+          setScanResult({ type: 'QR_LINK', value: decodedText });
+          stopScanner();
+          setView('SUCCESS');
+        },
+        () => {} // Ignora falhas visuais de frame
+      );
 
-        // Verifica se a câmera do celular permite ligar o Flash (Torch)
-        const track = html5QrCode.getVideoTrack();
-        if (track && track.getCapabilities && track.getCapabilities().torch) {
-          setHasTorchSupport(true);
-        }
-
-      } catch (err) {
-        console.error(err);
-        setCameraError('Câmera indisponível. Seu navegador pode estar bloqueando o acesso.');
-        stopScanner();
-        setView('HOME');
+      const track = html5QrCode.getVideoTrack();
+      if (track && track.getCapabilities && track.getCapabilities().torch) {
+        setHasTorchSupport(true);
       }
-    }, 150);
+
+    } catch (err) {
+      console.error("Erro Câmera:", err);
+      // Mensagens claras e amigáveis para orientar o motorista
+      if (err.name === 'NotAllowedError' || (err.message && err.message.toLowerCase().includes('permission'))) {
+        setCameraError('Permissão negada. Clique no ícone de "Cadeado" ou "aA" na barra de endereços do navegador e permita o uso da Câmera para este site.');
+      } else {
+        setCameraError('Câmera indisponível no momento. Ela pode estar em uso por outro aplicativo.');
+      }
+      stopScanner();
+      setView('HOME');
+    }
   };
 
   const stopScanner = async () => {
@@ -124,7 +127,6 @@ export default function CondutorHome() {
     }
   };
 
-  // --- MODO 2: UPLOAD DA GALERIA / CÂMERA NATIVA ---
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -133,23 +135,19 @@ export default function CondutorHome() {
     setCameraError('');
 
     try {
-      // 1. Redimensiona a imagem para evitar estouro de memória (OOM)
       const leveFile = await resizeImage(file);
-
-      // 2. Tenta ler o QR Code da imagem leve
       const html5QrCode = new Html5Qrcode("qr-reader-file");
+      
       try {
         const decodedText = await html5QrCode.scanFile(leveFile, true);
         setScanResult({ type: 'QR_LINK', value: decodedText });
         setView('SUCCESS');
         return;
       } catch (qrErr) {
-        console.log("QR Code não legível na foto. Preparando envio para API...");
+        console.log("QR Code não achado na foto. Mandando pra nuvem...");
       }
 
-      // 3. IA EXTERNA: Se não achou o QR Code, enviaremos a imagem leve para nossa API futura
       setTimeout(() => {
-        // Mock do envio para o Backend (Implementaremos na /api)
         setScanResult({ type: 'PHOTO_UPLOAD', value: leveFile });
         setView('SUCCESS');
       }, 1000);
@@ -162,7 +160,6 @@ export default function CondutorHome() {
     }
   };
 
-  // --- MODO 3: FORMULÁRIO MANUAL REAL ---
   const handleManualSubmit = (e) => {
     e.preventDefault();
     setScanResult({ type: 'MANUAL_DATA', value: formData });
@@ -186,36 +183,33 @@ export default function CondutorHome() {
       <div id="qr-reader-file" style={{ display: 'none' }}></div>
 
       {cameraError && view === 'HOME' && (
-        <div className="mb-6 p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-start gap-3 shadow-sm">
-          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5 text-red-500" />
-          <p className="text-sm font-medium">{cameraError}</p>
+        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl flex items-start gap-3 shadow-sm">
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5 text-amber-500" />
+          <p className="text-sm font-medium leading-relaxed">{cameraError}</p>
         </div>
       )}
 
-      {/* --- TELA: CARREGANDO (PROCESSAMENTO) --- */}
       {view === 'LOADING' && (
         <div className="flex flex-col items-center justify-center p-10 bg-white rounded-2xl border border-gray-200 shadow-sm mt-4">
           <Loader2 className="w-12 h-12 text-brand-600 animate-spin mb-4" />
-          <h3 className="text-lg font-bold text-gray-800 text-center">Analisando Cupom...</h3>
-          <p className="text-sm text-gray-500 mt-2 text-center">Preparando imagem para extração de dados.</p>
+          <h3 className="text-lg font-bold text-gray-800 text-center">Analisando Imagem...</h3>
+          <p className="text-sm text-gray-500 mt-2 text-center">Ajustando para processamento no servidor.</p>
         </div>
       )}
 
-      {/* --- TELA: CÂMERA AO VIVO --- */}
       {view === 'SCANNER' && (
         <div className="flex flex-col items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-200">
-          <p className="text-sm text-brand-600 font-semibold mb-3 text-center">
-            Centralize o QR Code no quadrado abaixo
+          <p className="text-sm text-brand-600 font-semibold mb-3 text-center animate-pulse">
+            Aponte para o QR Code
           </p>
           
-          <div className="relative w-full max-w-sm mb-4">
-            <div id="qr-reader" className="w-full aspect-square rounded-xl overflow-hidden bg-black border-2 border-brand-500"></div>
+          <div className="relative w-full max-w-sm mb-4 bg-black rounded-xl overflow-hidden flex items-center justify-center min-h-[300px]">
+            <div id="qr-reader" className="w-full h-full border-2 border-brand-500"></div>
             
-            {/* Botão de Lanterna (Só aparece se o celular suportar) */}
             {hasTorchSupport && (
               <button 
                 onClick={toggleTorch}
-                className={`absolute bottom-4 right-4 p-3 rounded-full shadow-lg backdrop-blur-md transition ${torchEnabled ? 'bg-yellow-400 text-yellow-900' : 'bg-black/50 text-white'}`}
+                className={`absolute bottom-4 right-4 p-3 rounded-full shadow-lg backdrop-blur-md transition z-50 ${torchEnabled ? 'bg-yellow-400 text-yellow-900' : 'bg-black/60 text-white'}`}
               >
                 <Flashlight className="w-6 h-6" />
               </button>
@@ -228,9 +222,8 @@ export default function CondutorHome() {
         </div>
       )}
 
-      {/* --- TELA: FORMULÁRIO MANUAL --- */}
       {view === 'MANUAL' && (
-        <form onSubmit={handleManualSubmit} className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm mb-6 animate-fade-in">
+        <form onSubmit={handleManualSubmit} className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm mb-6">
           <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
             <Edit3 className="w-5 h-5 text-brand-600" /> Dados do Abastecimento
           </h3>
@@ -272,45 +265,44 @@ export default function CondutorHome() {
 
           <div className="flex gap-3 mt-6">
             <button type="button" onClick={() => setView('HOME')} className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-medium hover:bg-gray-200">Cancelar</button>
-            <button type="submit" className="flex-1 py-3 bg-brand-600 text-white rounded-xl font-medium hover:bg-brand-700">Salvar Dados</button>
+            <button type="submit" className="flex-1 py-3 bg-brand-600 text-white rounded-xl font-medium hover:bg-brand-700">Revisar Dados</button>
           </div>
         </form>
       )}
 
-      {/* --- TELA: SUCESSO (PRONTO PARA ENVIAR) --- */}
       {view === 'SUCCESS' && scanResult && (
         <div className="flex flex-col items-center bg-brand-50 p-6 rounded-2xl border border-brand-200 text-center shadow-sm">
           <CheckCircle2 className="w-16 h-16 text-brand-500 mb-4" />
           <h2 className="text-xl font-bold text-brand-900 mb-1">
             {scanResult.type === 'QR_LINK' && 'QR Code Lido!'}
-            {scanResult.type === 'PHOTO_UPLOAD' && 'Foto Pronta para IA!'}
-            {scanResult.type === 'MANUAL_DATA' && 'Dados Preenchidos!'}
+            {scanResult.type === 'PHOTO_UPLOAD' && 'Foto Registrada!'}
+            {scanResult.type === 'MANUAL_DATA' && 'Dados Confirmados!'}
           </h2>
           
           <div className="bg-white p-3 rounded-lg border border-brand-100 w-full mb-6 mt-4">
-            {scanResult.type === 'QR_LINK' && <p className="text-xs text-gray-500 font-mono break-all">{scanResult.value}</p>}
-            {scanResult.type === 'PHOTO_UPLOAD' && <p className="text-sm text-gray-600 font-medium">Imagem otimizada com sucesso.</p>}
+            {scanResult.type === 'QR_LINK' && <p className="text-xs text-gray-500 font-mono break-all text-left">{scanResult.value}</p>}
+            {scanResult.type === 'PHOTO_UPLOAD' && <p className="text-sm text-gray-600 font-medium">Imagem redimensionada para economia de dados e pronta para a nuvem.</p>}
             {scanResult.type === 'MANUAL_DATA' && (
               <ul className="text-sm text-gray-700 text-left space-y-1">
                 <li><b>KM:</b> {scanResult.value.odometer}</li>
                 <li><b>Combustível:</b> {scanResult.value.fuelType}</li>
+                <li><b>Litros:</b> {scanResult.value.liters} L</li>
                 <li><b>Total:</b> R$ {scanResult.value.totalValue}</li>
               </ul>
             )}
           </div>
           
           <div className="w-full space-y-3">
-            <button onClick={() => alert('Próximo passo: Integração com o Banco de Dados e API SEFAZ!')} className="w-full bg-brand-600 text-white py-4 rounded-xl font-medium hover:bg-brand-700 shadow-sm">
-              Confirmar Despesa
+            <button onClick={() => alert('Próximo passo: Gravar no Supabase e API SEFAZ!')} className="w-full bg-brand-600 text-white py-4 rounded-xl font-medium hover:bg-brand-700 shadow-sm">
+              Concluir Registro
             </button>
             <button onClick={resetProcess} className="w-full bg-white text-gray-600 border border-gray-300 py-3 rounded-xl font-medium hover:bg-gray-50">
-              Descartar e Tentar Novamente
+              Cancelar e Voltar
             </button>
           </div>
         </div>
       )}
 
-      {/* --- TELA: HOME (BOTÕES PRINCIPAIS) --- */}
       {view === 'HOME' && (
         <div className="flex flex-col gap-4 mt-2">
           <button onClick={startScanner} className="flex flex-col items-center justify-center gap-3 bg-brand-600 text-white py-8 rounded-2xl hover:bg-brand-700 shadow-md group">
