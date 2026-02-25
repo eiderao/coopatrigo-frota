@@ -12,52 +12,37 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     let isMounted = true;
 
-    // 🔴 TRAVA INQUEBRÁVEL: Após 4 segundos, a tela de loading é destruída à força.
-    const safetyTimer = setTimeout(() => {
-      if (isMounted && loading) {
-        console.warn("Forçando destravamento da tela de Autenticação...");
-        setLoading(false);
-      }
-    }, 4000);
-
-    const initialize = async () => {
+    const initAuth = async () => {
       try {
         const { data: { session }, error } = await supabase.auth.getSession();
-        if (error) throw error;
+        
+        if (error) {
+          await supabase.auth.signOut();
+          return;
+        }
 
         if (session?.user) {
           if (isMounted) setUser(session.user);
-          
-          const { data: userProfile } = await supabase
-            .from('user_profiles')
-            .select('*')
-            .eq('id', session.user.id)
-            .single();
-
-          if (isMounted && userProfile) setProfile(userProfile);
+          const { data: p } = await supabase.from('user_profiles').select('*').eq('id', session.user.id).single();
+          if (isMounted && p) setProfile(p);
         }
       } catch (err) {
-        console.error("Erro na sessão recuperada:", err);
-        // Limpa silenciosamente para não travar
-        await supabase.auth.signOut();
+        console.error("Erro auth:", err);
       } finally {
         if (isMounted) setLoading(false);
-        clearTimeout(safetyTimer);
       }
     };
 
-    initialize();
+    initAuth();
 
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+    const { data: listener } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!isMounted) return;
-      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-        setUser(session?.user || null);
-        if (session?.user) {
-          const { data: userProfile } = await supabase.from('user_profiles').select('*').eq('id', session.user.id).single();
-          setProfile(userProfile);
-        }
+      if (session?.user) {
+        setUser(session.user);
+        const { data: p } = await supabase.from('user_profiles').select('*').eq('id', session.user.id).single();
+        setProfile(p);
         setLoading(false);
-      } else if (event === 'SIGNED_OUT') {
+      } else {
         setUser(null);
         setProfile(null);
         setLoading(false);
@@ -66,8 +51,7 @@ export const AuthProvider = ({ children }) => {
 
     return () => {
       isMounted = false;
-      clearTimeout(safetyTimer);
-      if (authListener?.subscription) authListener.subscription.unsubscribe();
+      if (listener?.subscription) listener.subscription.unsubscribe();
     };
   }, []);
 
@@ -81,18 +65,14 @@ export const AuthProvider = ({ children }) => {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-brand-50 flex flex-col items-center justify-center px-4 text-center">
+      <div className="min-h-screen bg-brand-50 flex flex-col items-center justify-center">
         <Loader2 className="h-12 w-12 text-brand-600 animate-spin mb-4" />
-        <p className="text-brand-900 font-medium animate-pulse">Autenticando...</p>
+        <p className="text-brand-900 font-medium">Carregando...</p>
       </div>
     );
   }
 
-  return (
-    <AuthContext.Provider value={{ user, profile, loading, signOut }}>
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={{ user, profile, loading, signOut }}>{children}</AuthContext.Provider>;
 };
 
 export const useAuth = () => useContext(AuthContext);
