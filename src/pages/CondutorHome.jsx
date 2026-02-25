@@ -13,7 +13,7 @@ export default function CondutorHome() {
     odometer: '', fuelType: 'Gasolina', liters: '', pricePerLiter: '', totalValue: ''
   });
 
-  // --- ENVIO DIRETO E BLINDADO PARA A NUVEM ---
+  // --- ENVIO DIRETO COM SISTEMA ANTI-LOCK (WAKE UP DELAY) ---
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -26,23 +26,41 @@ export default function CondutorHome() {
       const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
       const filePath = `${user.id}/${fileName}`;
 
-      // 1. Upload direto
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('receipts')
-        .upload(filePath, file, {
-          cacheControl: '3600',
-          upsert: false // Garante que não tente sobrescrever
-        });
+      // 🔴 O SEGREDO 1: Dá 1 segundo para o navegador "acordar" e o Supabase destravar o login
+      await new Promise(resolve => setTimeout(resolve, 1000));
 
-      if (uploadError) {
-        console.error("Erro detalhado do Storage:", uploadError);
-        throw new Error(`Erro no Supabase: ${uploadError.message}`);
+      let uploadError = null;
+
+      // 🔴 O SEGREDO 2: Sistema de Retry. Se o LockManager travar, ele tenta de novo silenciosamente.
+      for (let tentativa = 1; tentativa <= 2; tentativa++) {
+        const { error } = await supabase.storage
+          .from('receipts')
+          .upload(filePath, file, { cacheControl: '3600', upsert: false });
+
+        if (!error) {
+          uploadError = null;
+          break; // Sucesso absoluto, sai do loop!
+        }
+
+        uploadError = error;
+        
+        // Se o erro for o LockManager, espera mais 2 segundos e tenta a segunda vez
+        if (error.message.includes('lock') || error.message.includes('LockManager')) {
+          console.warn(`Tentativa ${tentativa} falhou por Lock. Tentando novamente...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        } else {
+          break; // Se for outro erro (ex: sem internet), aborta na hora
+        }
       }
 
-      // 2. Pega URL
+      if (uploadError) {
+        throw new Error(uploadError.message);
+      }
+
+      // 3. Pega URL
       const { data: { publicUrl } } = supabase.storage.from('receipts').getPublicUrl(filePath);
 
-      // 3. Grava no banco de dados (Tabela expenses)
+      // 4. Grava no banco de dados
       const { error: dbError } = await supabase.from('expenses').insert({
         "tenantId": profile.tenantId,
         driver_id: user.id,
@@ -54,17 +72,14 @@ export default function CondutorHome() {
         data_source: 'upload'
       });
 
-      if (dbError) {
-        console.error("Erro detalhado do Database:", dbError);
-        throw new Error(`Erro ao gravar despesa: ${dbError.message}`);
-      }
+      if (dbError) throw new Error(`Erro banco de dados: ${dbError.message}`);
 
       setView('SUCCESS');
     } catch (err) {
-      setErrorMsg(err.message || 'Falha desconhecida ao processar o arquivo.');
+      setErrorMsg(`Erro: ${err.message}`);
       setView('HOME');
     } finally {
-      e.target.value = ''; // Libera a memória do input imediatamente
+      e.target.value = ''; // Libera a memória do input
     }
   };
 
