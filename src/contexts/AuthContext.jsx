@@ -12,65 +12,52 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     let isMounted = true;
 
-    const recoverSession = async () => {
+    // 🔴 TRAVA INQUEBRÁVEL: Após 4 segundos, a tela de loading é destruída à força.
+    const safetyTimer = setTimeout(() => {
+      if (isMounted && loading) {
+        console.warn("Forçando destravamento da tela de Autenticação...");
+        setLoading(false);
+      }
+    }, 4000);
+
+    const initialize = async () => {
       try {
-        // 1. Tenta buscar a sessão atual
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-        
-        // Se houver erro de token corrompido, joga para o catch imediatamente
-        if (sessionError) throw sessionError;
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) throw error;
 
         if (session?.user) {
           if (isMounted) setUser(session.user);
           
-          // 2. Busca o perfil do usuário
-          const { data: userProfile, error: profileError } = await supabase
-            .from('user_profiles')
-            .select('*')
-            .eq('id', session.user.id)
-            .single();
-
-          if (profileError && profileError.code !== 'PGRST116') {
-            console.error("Erro ao buscar perfil:", profileError);
-          }
-          
-          if (isMounted && userProfile) setProfile(userProfile);
-        }
-      } catch (err) {
-        // SOLUÇÃO ELEGANTE: Tratamento silencioso de cache/sessão inválida
-        console.warn("Sessão corrompida ou expirada. Limpando ambiente silenciosamente...", err);
-        
-        // Força a limpeza do Supabase e do navegador sem assustar o usuário
-        await supabase.auth.signOut();
-        
-        if (isMounted) {
-          setUser(null);
-          setProfile(null);
-        }
-      } finally {
-        // Independentemente do que aconteça, libera a tela de loading
-        if (isMounted) setLoading(false);
-      }
-    };
-
-    recoverSession();
-
-    // Listener para gerenciar login/logout em tempo real e expiração de abas
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (!isMounted) return;
-      
-      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-        setUser(session?.user || null);
-        if (session?.user) {
           const { data: userProfile } = await supabase
             .from('user_profiles')
             .select('*')
             .eq('id', session.user.id)
             .single();
+
+          if (isMounted && userProfile) setProfile(userProfile);
+        }
+      } catch (err) {
+        console.error("Erro na sessão recuperada:", err);
+        // Limpa silenciosamente para não travar
+        await supabase.auth.signOut();
+      } finally {
+        if (isMounted) setLoading(false);
+        clearTimeout(safetyTimer);
+      }
+    };
+
+    initialize();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (!isMounted) return;
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        setUser(session?.user || null);
+        if (session?.user) {
+          const { data: userProfile } = await supabase.from('user_profiles').select('*').eq('id', session.user.id).single();
           setProfile(userProfile);
         }
         setLoading(false);
-      } else if (event === 'SIGNED_OUT' || event === 'USER_DELETED') {
+      } else if (event === 'SIGNED_OUT') {
         setUser(null);
         setProfile(null);
         setLoading(false);
@@ -79,6 +66,7 @@ export const AuthProvider = ({ children }) => {
 
     return () => {
       isMounted = false;
+      clearTimeout(safetyTimer);
       if (authListener?.subscription) authListener.subscription.unsubscribe();
     };
   }, []);

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus, Keyboard } from 'lucide-react';
+import { Camera, XCircle, CheckCircle2, Keyboard, AlertCircle } from 'lucide-react';
 
 export default function CondutorHome() {
   const [isScanning, setIsScanning] = useState(false);
@@ -8,12 +8,10 @@ export default function CondutorHome() {
   const [resultType, setResultType] = useState('');
   const [cameraError, setCameraError] = useState('');
   
-  // Estado para o modo de digitação manual
   const [isManualMode, setIsManualMode] = useState(false);
   const [manualKey, setManualKey] = useState('');
 
   const scannerRef = useRef(null);
-  const fileInputRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -21,7 +19,6 @@ export default function CondutorHome() {
     };
   }, []);
 
-  // --- MODO 1: CÂMERA AO VIVO ---
   const startScanner = async () => {
     setIsScanning(true);
     setScanResult(null);
@@ -52,8 +49,9 @@ export default function CondutorHome() {
           () => {} 
         );
       } catch (err) {
-        setCameraError('Acesso à câmera indisponível. Use a Câmera Nativa ou digite a chave.');
+        setCameraError('Câmera indisponível. Por favor, digite a chave manualmente.');
         setIsScanning(false);
+        setIsManualMode(true);
       }
     }, 100);
   };
@@ -67,33 +65,6 @@ export default function CondutorHome() {
       } catch (err) {}
     }
     setIsScanning(false);
-  };
-
-  // --- MODO 2: UPLOAD ULTRA-LEVE (SEM TESSERACT) ---
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    setCameraError('');
-    setIsManualMode(false);
-    
-    // Mostra um feedback visual rápido sem travar a thread principal
-    setCameraError('Analisando imagem...'); 
-
-    try {
-      const html5QrCode = new Html5Qrcode("qr-reader-file");
-      const decodedText = await html5QrCode.scanFile(file, true); // Tenta ler o QR direto do arquivo original
-      
-      setScanResult(decodedText);
-      setResultType('URL');
-      setCameraError('');
-    } catch (err) {
-      // Se a foto falhar, não tentamos OCR aqui no celular. Pede para digitar ou enviaremos pra nuvem depois.
-      setCameraError('Não foi possível ler o QR Code nesta foto. Por favor, digite a Chave de 44 dígitos.');
-      setIsManualMode(true); // Abre o campo de digitação automaticamente
-    } finally {
-      e.target.value = ''; 
-    }
   };
 
   const handleManualSubmit = (e) => {
@@ -124,18 +95,15 @@ export default function CondutorHome() {
         <p className="text-gray-500 text-sm mt-1">Escaneie o QR Code ou insira a chave da Nota Fiscal.</p>
       </div>
 
-      <div id="qr-reader-file" style={{ display: 'none' }}></div>
-
       {cameraError && !scanResult && (
-        <div className={`mb-6 p-4 border rounded-xl flex items-start gap-3 ${cameraError === 'Analisando imagem...' ? 'bg-blue-50 border-blue-200 text-blue-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
-          <AlertCircle className={`w-5 h-5 shrink-0 mt-0.5 ${cameraError === 'Analisando imagem...' ? 'text-blue-500 animate-pulse' : 'text-red-500'}`} />
+        <div className="mb-6 p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5 text-red-500" />
           <div className="flex-1">
             <p className="text-sm font-medium">{cameraError}</p>
           </div>
         </div>
       )}
 
-      {/* MODO MANUAL (FALLBACK IMEDIATO) */}
       {isManualMode && !scanResult && (
         <form onSubmit={handleManualSubmit} className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm mb-6">
           <label className="block text-sm font-semibold text-gray-700 mb-2">Chave de Acesso (44 números)</label>
@@ -143,7 +111,7 @@ export default function CondutorHome() {
             rows="3"
             value={manualKey}
             onChange={(e) => setManualKey(e.target.value)}
-            placeholder="Ex: 3123 0112 3456 7890 1234 5678 9012 3456 7890 1234"
+            placeholder="Ex: 3123 0112 3456... (Digite apenas números)"
             className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-sm font-mono resize-none"
           ></textarea>
           <div className="flex gap-3 mt-4">
@@ -186,13 +154,7 @@ export default function CondutorHome() {
         <div className="flex flex-col gap-4 mt-2">
           <button onClick={startScanner} className="flex flex-col items-center justify-center gap-3 bg-brand-600 text-white py-8 rounded-2xl hover:bg-brand-700 transition shadow-md group">
             <Camera className="w-10 h-10 group-hover:scale-110 transition-transform" />
-            <span className="text-lg font-semibold">Câmera Rápida</span>
-          </button>
-
-          <input type="file" accept="image/*" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-          <button onClick={() => fileInputRef.current.click()} className="flex items-center justify-center gap-3 bg-brand-50 border border-brand-200 text-brand-700 py-4 rounded-xl hover:bg-brand-100 transition font-medium shadow-sm">
-            <ImagePlus className="w-6 h-6" />
-            Tirar Foto Nativa (Alta Resolução)
+            <span className="text-lg font-semibold">Abrir Câmera</span>
           </button>
 
           <div className="relative flex items-center py-2">
