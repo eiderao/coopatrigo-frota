@@ -13,9 +13,7 @@ const GestorHome = () => (
 
 const PrivateRoute = ({ children }) => {
   const { user, profile, signOut } = useAuth();
-
   if (!user) return <Navigate to="/" replace />;
-
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <header className="bg-white shadow-sm px-6 py-4 flex justify-between items-center sticky top-0 z-10 border-b border-gray-100">
@@ -29,10 +27,7 @@ const PrivateRoute = ({ children }) => {
               {profile?.role}
             </span>
           </div>
-          <button 
-            onClick={signOut}
-            className="text-sm bg-red-50 text-red-600 px-3 py-1.5 rounded-md hover:bg-red-100 font-medium transition"
-          >
+          <button onClick={signOut} className="text-sm bg-red-50 text-red-600 px-3 py-1.5 rounded-md hover:bg-red-100 font-medium transition">
             Sair
           </button>
         </div>
@@ -46,13 +41,11 @@ const PrivateRoute = ({ children }) => {
 
 const DashboardRouter = () => {
   const { profile } = useAuth();
-  
   if (profile?.role === 'gestor' || profile?.role === 'Administrador') return <GestorHome />;
   if (profile?.role === 'condutor' || profile?.role === 'Avaliador' || profile?.role === 'recruiter') return <CondutorHome />;
-  
   return (
     <div className="p-6 text-center text-amber-600 font-medium bg-amber-50 rounded-lg m-6 border border-amber-200">
-      Seu perfil ({profile?.role || 'Não definido'}) não possui acesso a um painel válido.
+      Aguardando configuração de perfil... Seu cargo é: {profile?.role || 'Indefinido'}
     </div>
   );
 };
@@ -63,14 +56,7 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Login />} />
-          <Route 
-            path="/dashboard/*" 
-            element={
-              <PrivateRoute>
-                <DashboardRouter />
-              </PrivateRoute>
-            } 
-          />
+          <Route path="/dashboard/*" element={<PrivateRoute><DashboardRouter /></PrivateRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
