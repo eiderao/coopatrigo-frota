@@ -1,11 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
-import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus } from 'lucide-react';
+import Tesseract from 'tesseract.js';
+import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus, Loader2 } from 'lucide-react';
 
 export default function CondutorHome() {
   const [isScanning, setIsScanning] = useState(false);
+  const [isOcrLoading, setIsOcrLoading] = useState(false);
   const [scanResult, setScanResult] = useState(null);
+  const [resultType, setResultType] = useState(''); // 'URL' ou 'CHAVE_44'
   const [cameraError, setCameraError] = useState('');
+  
   const scannerRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -17,7 +21,7 @@ export default function CondutorHome() {
     };
   }, []);
 
-  // --- MODO 1: CÂMERA AO VIVO (COM TENTATIVA DE FOCO CONTÍNUO) ---
+  // --- MODO 1: CÂMERA AO VIVO (Corrigido o crash do Foco Contínuo) ---
   const startScanner = async () => {
     setIsScanning(true);
     setScanResult(null);
@@ -29,11 +33,7 @@ export default function CondutorHome() {
         scannerRef.current = html5QrCode;
 
         await html5QrCode.start(
-          { 
-            facingMode: "environment",
-            // Tenta forçar o navegador a usar o foco automático contínuo
-            advanced: [{ focusMode: "continuous" }] 
-          },
+          { facingMode: "environment" }, // Removido o advanced focus para evitar crash em iPhones/Androids
           {
             fps: 10,
             qrbox: (viewfinderWidth, viewfinderHeight) => {
@@ -48,15 +48,16 @@ export default function CondutorHome() {
           },
           (decodedText) => {
             setScanResult(decodedText);
+            setResultType('URL');
             stopScanner(html5QrCode);
           },
           (errorMessage) => {
-            // Silencia erros de frame
+            // Ignora os erros silenciosos de frame
           }
         );
       } catch (err) {
         console.error("Erro ao iniciar a lente:", err);
-        setCameraError('Não foi possível focar ou acessar a câmera do navegador. Recomendamos usar o botão de Câmera Nativa abaixo.');
+        setCameraError('Não foi possível acessar a câmera do navegador. Recomendamos usar o botão de Câmera Nativa abaixo.');
         setIsScanning(false);
       }
     }, 100);
@@ -76,29 +77,65 @@ export default function CondutorHome() {
     setIsScanning(false);
   };
 
-  // --- MODO 2: CÂMERA NATIVA OU GALERIA (CORRIGIDO) ---
+  // --- MODO 2: PIPELINE INTELIGENTE (QR CODE -> OCR) ---
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
+    setCameraError('');
+    setIsOcrLoading(true); // Inicia o estado de carregamento global da leitura
+
     try {
+      // TENTATIVA 1: Procurar QR Code na imagem
       const html5QrCode = new Html5Qrcode("qr-reader-file");
       const decodedText = await html5QrCode.scanFile(file, true);
+      
       setScanResult(decodedText);
-      setCameraError('');
+      setResultType('URL');
+      setIsOcrLoading(false);
+
     } catch (err) {
-      setCameraError('Nenhum QR Code encontrado nesta imagem. Tente uma foto mais nítida do cupom fiscal.');
+      // TENTATIVA 2: QR Code falhou. Aciona a IA de OCR para procurar os 44 dígitos
+      console.log("QR Code não encontrado, iniciando OCR Tesseract...");
+      
+      try {
+        const { data: { text } } = await Tesseract.recognize(
+          file,
+          'por', // Idioma português
+          { logger: m => console.log(m) } // Opcional para ver o progresso no console
+        );
+
+        // Limpa tudo que não for número na imagem lida
+        const digitsOnly = text.replace(/\D/g, '');
+        
+        // Procura exatamente uma sequência de 44 números
+        const match44 = digitsOnly.match(/\d{44}/);
+
+        if (match44) {
+          setScanResult(match44[0]);
+          setResultType('CHAVE_44');
+        } else {
+          setCameraError('Não localizamos o QR Code nem a Chave de 44 dígitos na foto. Tente uma imagem mais nítida ou digite a chave manualmente.');
+        }
+      } catch (ocrErr) {
+        console.error("Erro no OCR:", ocrErr);
+        setCameraError('Erro ao processar a imagem. Tente novamente.');
+      }
+      
+      setIsOcrLoading(false);
     }
-    e.target.value = ''; 
+    
+    e.target.value = ''; // Reseta o input
   };
 
   const resetProcess = () => {
     setScanResult(null);
     setCameraError('');
+    setResultType('');
   };
 
   const handleProcessReceipt = () => {
-    alert(`Pronto para enviar para a SEFAZ:\n\n${scanResult}`);
+    alert(`Enviando para a API SEFAZ:\n\nTIPO: ${resultType}\nDADO: ${scanResult}`);
   };
 
   return (
@@ -110,7 +147,17 @@ export default function CondutorHome() {
 
       <div id="qr-reader-file" style={{ display: 'none' }}></div>
 
-      {cameraError && !isScanning && !scanResult && (
+      {/* ESTADO DE CARREGAMENTO DO OCR (FOTO ENVIADA) */}
+      {isOcrLoading && (
+        <div className="flex flex-col items-center justify-center p-8 bg-white rounded-2xl border border-gray-200 shadow-sm mb-6">
+          <Loader2 className="w-12 h-12 text-brand-600 animate-spin mb-4" />
+          <h3 className="text-lg font-bold text-gray-800 text-center">Lendo a Nota Fiscal...</h3>
+          <p className="text-sm text-gray-500 mt-2 text-center">Buscando QR Code ou Chave de 44 dígitos. Isso pode levar alguns segundos.</p>
+        </div>
+      )}
+
+      {/* MENSAGEM DE ERRO */}
+      {cameraError && !isScanning && !scanResult && !isOcrLoading && (
         <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
           <div className="flex-1">
@@ -122,11 +169,9 @@ export default function CondutorHome() {
         </div>
       )}
 
-      {isScanning && (
+      {/* MODO CÂMERA AO VIVO */}
+      {isScanning && !isOcrLoading && (
         <div className="flex flex-col items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-200">
-          <p className="text-sm text-brand-600 font-semibold mb-3 animate-pulse text-center">
-            Afaste um pouco o celular.<br/>Se ficar embaçado, use a Câmera Nativa.
-          </p>
           <div id="qr-reader" className="w-full aspect-square max-w-sm rounded-lg overflow-hidden border-2 border-brand-500 mb-4 bg-black"></div>
           <button onClick={() => stopScanner()} className="w-full flex justify-center items-center gap-2 bg-red-50 text-red-600 py-4 rounded-xl font-medium hover:bg-red-100 transition">
             <XCircle className="w-5 h-5" /> Cancelar Câmera
@@ -134,25 +179,35 @@ export default function CondutorHome() {
         </div>
       )}
 
-      {scanResult && !isScanning && (
+      {/* SUCESSO (QR LIDO OU CHAVE ENCONTRADA) */}
+      {scanResult && !isScanning && !isOcrLoading && (
         <div className="flex flex-col items-center bg-brand-50 p-6 rounded-2xl border border-brand-200 text-center shadow-sm">
           <CheckCircle2 className="w-16 h-16 text-brand-500 mb-4" />
-          <h2 className="text-xl font-bold text-brand-900 mb-2">QR Code Lido!</h2>
+          <h2 className="text-xl font-bold text-brand-900 mb-1">
+            {resultType === 'URL' ? 'QR Code Lido!' : 'Chave Localizada!'}
+          </h2>
+          <span className="text-xs font-semibold text-brand-600 bg-brand-100 px-3 py-1 rounded-full mb-4">
+            {resultType === 'URL' ? 'Link SEFAZ' : '44 Dígitos Numericos'}
+          </span>
+          
           <div className="bg-white p-3 rounded-lg border border-brand-100 w-full mb-6">
-            <p className="text-xs text-gray-500 font-mono break-all line-clamp-3 text-left">{scanResult}</p>
+            <p className="text-xs text-gray-500 font-mono break-all text-left">
+              {scanResult}
+            </p>
           </div>
           <div className="w-full space-y-3">
             <button onClick={handleProcessReceipt} className="w-full bg-brand-600 text-white py-4 rounded-xl font-medium hover:bg-brand-700 transition shadow-sm">
-              Processar Nota Fiscal
+              Continuar com esta Nota
             </button>
             <button onClick={resetProcess} className="w-full bg-white text-gray-600 border border-gray-300 py-3 rounded-xl font-medium hover:bg-gray-50 transition">
-              Ler outro QR Code
+              Tentar outra imagem
             </button>
           </div>
         </div>
       )}
 
-      {!isScanning && !scanResult && (
+      {/* TELA INICIAL (BOTÕES) */}
+      {!isScanning && !scanResult && !isOcrLoading && (
         <div className="flex flex-col gap-4 mt-2">
           
           <button onClick={startScanner} className="flex flex-col items-center justify-center gap-3 bg-brand-600 text-white py-8 rounded-2xl hover:bg-brand-700 transition shadow-md group">
@@ -160,7 +215,6 @@ export default function CondutorHome() {
             <span className="text-lg font-semibold">Câmera Rápida do App</span>
           </button>
 
-          {/* O SEGREDO ESTÁ AQUI: Sem o 'capture="environment"', ele permite abrir a galeria */}
           <input 
             type="file" 
             accept="image/*" 
@@ -181,7 +235,7 @@ export default function CondutorHome() {
 
           <button className="flex items-center justify-center gap-2 bg-white border border-gray-300 text-gray-700 py-4 rounded-xl hover:bg-gray-50 transition font-medium shadow-sm">
             <FileText className="w-5 h-5 text-gray-500" />
-            Digitar Manualmente
+            Digitar Chave Manualmente
           </button>
         </div>
       )}
