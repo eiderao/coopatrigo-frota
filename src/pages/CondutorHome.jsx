@@ -1,33 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import Tesseract from 'tesseract.js';
-import imageCompression from 'browser-image-compression';
-import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus, Loader2 } from 'lucide-react';
+import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus, Keyboard } from 'lucide-react';
 
 export default function CondutorHome() {
   const [isScanning, setIsScanning] = useState(false);
-  const [isOcrLoading, setIsOcrLoading] = useState(false);
-  const [ocrProgress, setOcrProgress] = useState(0);
   const [scanResult, setScanResult] = useState(null);
   const [resultType, setResultType] = useState('');
   const [cameraError, setCameraError] = useState('');
   
+  // Estado para o modo de digitação manual
+  const [isManualMode, setIsManualMode] = useState(false);
+  const [manualKey, setManualKey] = useState('');
+
   const scannerRef = useRef(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
     return () => {
-      if (scannerRef.current) {
-        scannerRef.current.stop().catch(() => {});
-      }
+      if (scannerRef.current) scannerRef.current.stop().catch(() => {});
     };
   }, []);
 
-  // --- MODO 1: CÂMERA AO VIVO OTIMIZADA ---
+  // --- MODO 1: CÂMERA AO VIVO ---
   const startScanner = async () => {
     setIsScanning(true);
     setScanResult(null);
     setCameraError('');
+    setIsManualMode(false);
 
     setTimeout(async () => {
       try {
@@ -37,11 +36,11 @@ export default function CondutorHome() {
         await html5QrCode.start(
           { facingMode: "environment" },
           {
-            fps: 15,
-            formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ], // Foca 100% em QR Code (ignora código de barras)
-            qrbox: (viewfinderWidth, viewfinderHeight) => {
-              const minEdgeSize = Math.min(viewfinderWidth, viewfinderHeight);
-              return { width: Math.floor(minEdgeSize * 0.8), height: Math.floor(minEdgeSize * 0.8) };
+            fps: 10,
+            formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ],
+            qrbox: (vw, vh) => {
+              const size = Math.min(vw, vh);
+              return { width: Math.floor(size * 0.8), height: Math.floor(size * 0.8) };
             },
             aspectRatio: 1.0
           },
@@ -50,98 +49,63 @@ export default function CondutorHome() {
             setResultType('URL');
             stopScanner(html5QrCode);
           },
-          () => {} // Ignora falhas de frame
+          () => {} 
         );
       } catch (err) {
-        setCameraError('Acesso à câmera negado ou indisponível. Use o botão de Câmera Nativa.');
+        setCameraError('Acesso à câmera indisponível. Use a Câmera Nativa ou digite a chave.');
         setIsScanning(false);
       }
     }, 100);
   };
 
-  const stopScanner = async (scannerInstance) => {
-    const instance = scannerInstance || scannerRef.current;
-    if (instance) {
+  const stopScanner = async () => {
+    if (scannerRef.current) {
       try {
-        await instance.stop();
-        instance.clear();
+        await scannerRef.current.stop();
+        scannerRef.current.clear();
         scannerRef.current = null;
       } catch (err) {}
     }
     setIsScanning(false);
   };
 
-  // --- MODO 2: UPLOAD (COMPRESSÃO SEGURA + OCR COM TIMEOUT) ---
+  // --- MODO 2: UPLOAD ULTRA-LEVE (SEM TESSERACT) ---
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
     setCameraError('');
-    setIsOcrLoading(true);
-    setOcrProgress(0);
+    setIsManualMode(false);
+    
+    // Mostra um feedback visual rápido sem travar a thread principal
+    setCameraError('Analisando imagem...'); 
 
     try {
-      // 1. COMPRESSÃO SEGURA COM WEB WORKERS (Evita falta de memória)
-      const options = {
-        maxSizeMB: 0.5,
-        maxWidthOrHeight: 1200,
-        useWebWorker: true,
-        initialQuality: 0.8
-      };
-      
-      const compressedFile = await imageCompression(file, options);
-
-      // 2. TENTATIVA RÁPIDA DE ACHAR O QR CODE NA FOTO
       const html5QrCode = new Html5Qrcode("qr-reader-file");
-      try {
-        const decodedText = await html5QrCode.scanFile(compressedFile, true);
-        setScanResult(decodedText);
-        setResultType('URL');
-        setIsOcrLoading(false);
-        return; 
-      } catch (qrErr) {
-        console.log("QR Code não legível, iniciando Inteligência Artificial...");
-      }
-
-      // 3. IA DE LEITURA (OCR) COM TRAVA DE TEMPO CONTRA LOOP INFINITO
-      // Se passar de 20 segundos, ele aborta forçadamente
-      const ocrPromise = Tesseract.recognize(
-        compressedFile,
-        'por',
-        { 
-          logger: m => {
-            if (m.status === 'recognizing text') {
-              setOcrProgress(Math.round(m.progress * 100));
-            }
-          } 
-        }
-      );
-
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('TIMEOUT')), 20000)
-      );
-
-      const { data: { text } } = await Promise.race([ocrPromise, timeoutPromise]);
-
-      const digitsOnly = text.replace(/\D/g, '');
-      const match44 = digitsOnly.match(/\d{44}/);
-
-      if (match44) {
-        setScanResult(match44[0]);
-        setResultType('CHAVE_44');
-      } else {
-        setCameraError('O cupom está muito amassado ou sem foco. Digite os 44 números manualmente.');
-      }
+      const decodedText = await html5QrCode.scanFile(file, true); // Tenta ler o QR direto do arquivo original
+      
+      setScanResult(decodedText);
+      setResultType('URL');
+      setCameraError('');
     } catch (err) {
-      console.error(err);
-      if (err.message === 'TIMEOUT') {
-        setCameraError('O celular demorou muito para processar a imagem e a operação foi cancelada. Tente novamente.');
-      } else {
-        setCameraError('Erro ao processar imagem. Tente tirar a foto com mais luz.');
-      }
+      // Se a foto falhar, não tentamos OCR aqui no celular. Pede para digitar ou enviaremos pra nuvem depois.
+      setCameraError('Não foi possível ler o QR Code nesta foto. Por favor, digite a Chave de 44 dígitos.');
+      setIsManualMode(true); // Abre o campo de digitação automaticamente
     } finally {
-      setIsOcrLoading(false);
-      e.target.value = ''; // Limpa o input
+      e.target.value = ''; 
+    }
+  };
+
+  const handleManualSubmit = (e) => {
+    e.preventDefault();
+    const cleanKey = manualKey.replace(/\D/g, '');
+    if (cleanKey.length === 44) {
+      setScanResult(cleanKey);
+      setResultType('CHAVE_44');
+      setIsManualMode(false);
+      setCameraError('');
+    } else {
+      setCameraError(`A chave precisa ter 44 números. Você digitou ${cleanKey.length}.`);
     }
   };
 
@@ -149,48 +113,48 @@ export default function CondutorHome() {
     setScanResult(null);
     setCameraError('');
     setResultType('');
+    setIsManualMode(false);
+    setManualKey('');
   };
 
   return (
     <div className="p-4 md:p-8 flex flex-col h-full max-w-lg mx-auto w-full">
-      <div className="mb-8">
+      <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-800">Registrar Despesa</h1>
         <p className="text-gray-500 text-sm mt-1">Escaneie o QR Code ou insira a chave da Nota Fiscal.</p>
       </div>
 
       <div id="qr-reader-file" style={{ display: 'none' }}></div>
 
-      {/* ESTADO DE CARREGAMENTO BLINDADO */}
-      {isOcrLoading && (
-        <div className="flex flex-col items-center justify-center p-8 bg-white rounded-2xl border border-gray-200 shadow-sm mb-6">
-          <Loader2 className="w-12 h-12 text-brand-600 animate-spin mb-4" />
-          <h3 className="text-lg font-bold text-gray-800 text-center">Analisando Imagem...</h3>
-          <div className="w-full bg-gray-200 rounded-full h-2.5 mt-4 mb-2">
-            <div className="bg-brand-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${ocrProgress}%` }}></div>
-          </div>
-          <p className="text-xs text-gray-500 font-medium">{ocrProgress}% concluído</p>
-        </div>
-      )}
-
-      {/* ERROS CLAROS PARA O USUÁRIO */}
-      {cameraError && !isScanning && !scanResult && !isOcrLoading && (
-        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3">
-          <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+      {cameraError && !scanResult && (
+        <div className={`mb-6 p-4 border rounded-xl flex items-start gap-3 ${cameraError === 'Analisando imagem...' ? 'bg-blue-50 border-blue-200 text-blue-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
+          <AlertCircle className={`w-5 h-5 shrink-0 mt-0.5 ${cameraError === 'Analisando imagem...' ? 'text-blue-500 animate-pulse' : 'text-red-500'}`} />
           <div className="flex-1">
-            <p className="text-sm text-red-700 font-medium">{cameraError}</p>
-            <button onClick={resetProcess} className="mt-3 text-sm text-red-600 underline font-semibold hover:text-red-800">
-              Tentar novamente
-            </button>
+            <p className="text-sm font-medium">{cameraError}</p>
           </div>
         </div>
       )}
 
-      {/* CÂMERA AO VIVO */}
-      {isScanning && !isOcrLoading && (
+      {/* MODO MANUAL (FALLBACK IMEDIATO) */}
+      {isManualMode && !scanResult && (
+        <form onSubmit={handleManualSubmit} className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm mb-6">
+          <label className="block text-sm font-semibold text-gray-700 mb-2">Chave de Acesso (44 números)</label>
+          <textarea 
+            rows="3"
+            value={manualKey}
+            onChange={(e) => setManualKey(e.target.value)}
+            placeholder="Ex: 3123 0112 3456 7890 1234 5678 9012 3456 7890 1234"
+            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-sm font-mono resize-none"
+          ></textarea>
+          <div className="flex gap-3 mt-4">
+            <button type="button" onClick={resetProcess} className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-medium hover:bg-gray-200 transition">Cancelar</button>
+            <button type="submit" className="flex-1 py-3 bg-brand-600 text-white rounded-xl font-medium hover:bg-brand-700 transition">Confirmar</button>
+          </div>
+        </form>
+      )}
+
+      {isScanning && (
         <div className="flex flex-col items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-200">
-          <p className="text-sm text-brand-600 font-semibold mb-3 animate-pulse text-center">
-            Mantenha o QR Code no centro.
-          </p>
           <div id="qr-reader" className="w-full aspect-square max-w-sm rounded-lg overflow-hidden border-2 border-brand-500 mb-4 bg-black"></div>
           <button onClick={() => stopScanner()} className="w-full flex justify-center items-center gap-2 bg-red-50 text-red-600 py-4 rounded-xl font-medium hover:bg-red-100 transition">
             <XCircle className="w-5 h-5" /> Cancelar
@@ -198,43 +162,37 @@ export default function CondutorHome() {
         </div>
       )}
 
-      {/* SUCESSO */}
-      {scanResult && !isScanning && !isOcrLoading && (
+      {scanResult && !isScanning && (
         <div className="flex flex-col items-center bg-brand-50 p-6 rounded-2xl border border-brand-200 text-center shadow-sm">
           <CheckCircle2 className="w-16 h-16 text-brand-500 mb-4" />
           <h2 className="text-xl font-bold text-brand-900 mb-1">
-            {resultType === 'URL' ? 'QR Code Lido!' : 'Chave Localizada!'}
+            {resultType === 'URL' ? 'QR Code Lido!' : 'Chave Confirmada!'}
           </h2>
-          <span className="text-xs font-semibold text-brand-600 bg-brand-100 px-3 py-1 rounded-full mb-4">
-            {resultType === 'URL' ? 'Link SEFAZ' : '44 Dígitos'}
-          </span>
-          <div className="bg-white p-3 rounded-lg border border-brand-100 w-full mb-6">
+          <div className="bg-white p-3 rounded-lg border border-brand-100 w-full mb-6 mt-4">
             <p className="text-xs text-gray-500 font-mono break-all text-left">{scanResult}</p>
           </div>
           <div className="w-full space-y-3">
-            <button onClick={() => alert('Chamar API SEFAZ...')} className="w-full bg-brand-600 text-white py-4 rounded-xl font-medium hover:bg-brand-700 transition shadow-sm">
-              Continuar com esta Nota
+            <button onClick={() => alert('Em breve: Enviar para API Backend Vercel')} className="w-full bg-brand-600 text-white py-4 rounded-xl font-medium hover:bg-brand-700 transition shadow-sm">
+              Buscar Dados da Nota
             </button>
             <button onClick={resetProcess} className="w-full bg-white text-gray-600 border border-gray-300 py-3 rounded-xl font-medium hover:bg-gray-50 transition">
-              Ler outra nota
+              Nova Leitura
             </button>
           </div>
         </div>
       )}
 
-      {/* BOTÕES INICIAIS */}
-      {!isScanning && !scanResult && !isOcrLoading && (
+      {!isScanning && !scanResult && !isManualMode && (
         <div className="flex flex-col gap-4 mt-2">
           <button onClick={startScanner} className="flex flex-col items-center justify-center gap-3 bg-brand-600 text-white py-8 rounded-2xl hover:bg-brand-700 transition shadow-md group">
             <Camera className="w-10 h-10 group-hover:scale-110 transition-transform" />
-            <span className="text-lg font-semibold">Câmera Rápida do App</span>
+            <span className="text-lg font-semibold">Câmera Rápida</span>
           </button>
 
           <input type="file" accept="image/*" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-          
           <button onClick={() => fileInputRef.current.click()} className="flex items-center justify-center gap-3 bg-brand-50 border border-brand-200 text-brand-700 py-4 rounded-xl hover:bg-brand-100 transition font-medium shadow-sm">
             <ImagePlus className="w-6 h-6" />
-            Usar Câmera Nativa ou Galeria
+            Tirar Foto Nativa (Alta Resolução)
           </button>
 
           <div className="relative flex items-center py-2">
@@ -243,9 +201,9 @@ export default function CondutorHome() {
             <div className="flex-grow border-t border-gray-200"></div>
           </div>
 
-          <button className="flex items-center justify-center gap-2 bg-white border border-gray-300 text-gray-700 py-4 rounded-xl hover:bg-gray-50 transition font-medium shadow-sm">
-            <FileText className="w-5 h-5 text-gray-500" />
-            Digitar Manualmente
+          <button onClick={() => setIsManualMode(true)} className="flex items-center justify-center gap-2 bg-white border border-gray-300 text-gray-700 py-4 rounded-xl hover:bg-gray-50 transition font-medium shadow-sm">
+            <Keyboard className="w-5 h-5 text-gray-500" />
+            Digitar Chave Manualmente
           </button>
         </div>
       )}
