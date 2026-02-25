@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 
 const AuthContext = createContext({});
 
@@ -8,55 +8,69 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [errorMsg, setErrorMsg] = useState('');
-
-  // 🔴 Botão de pânico para limpar tokens corrompidos do navegador
-  const forceClearCache = async () => {
-    localStorage.clear();
-    sessionStorage.clear();
-    await supabase.auth.signOut();
-    window.location.href = '/';
-  };
 
   useEffect(() => {
-    // Timeout de segurança contra loops infinitos
-    const timer = setTimeout(() => {
-      if (loading) {
-        setLoading(false);
-        setErrorMsg('Tempo limite excedido ao conectar no banco de dados. Pode ser um erro de cache no seu navegador.');
-      }
-    }, 8000);
+    let isMounted = true;
 
-    const checkSession = async () => {
+    const recoverSession = async () => {
       try {
+        // 1. Tenta buscar a sessão atual
         const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        
+        // Se houver erro de token corrompido, joga para o catch imediatamente
         if (sessionError) throw sessionError;
 
         if (session?.user) {
-          setUser(session.user);
+          if (isMounted) setUser(session.user);
           
-          // Busca o perfil
+          // 2. Busca o perfil do usuário
           const { data: userProfile, error: profileError } = await supabase
             .from('user_profiles')
             .select('*')
             .eq('id', session.user.id)
             .single();
 
-          if (profileError && profileError.code !== 'PGRST116') throw profileError;
-          setProfile(userProfile);
+          if (profileError && profileError.code !== 'PGRST116') {
+            console.error("Erro ao buscar perfil:", profileError);
+          }
+          
+          if (isMounted && userProfile) setProfile(userProfile);
         }
       } catch (err) {
-        console.error("Erro no Auth:", err);
+        // SOLUÇÃO ELEGANTE: Tratamento silencioso de cache/sessão inválida
+        console.warn("Sessão corrompida ou expirada. Limpando ambiente silenciosamente...", err);
+        
+        // Força a limpeza do Supabase e do navegador sem assustar o usuário
+        await supabase.auth.signOut();
+        
+        if (isMounted) {
+          setUser(null);
+          setProfile(null);
+        }
       } finally {
-        clearTimeout(timer);
-        setLoading(false);
+        // Independentemente do que aconteça, libera a tela de loading
+        if (isMounted) setLoading(false);
       }
     };
 
-    checkSession();
+    recoverSession();
 
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!session) {
+    // Listener para gerenciar login/logout em tempo real e expiração de abas
+    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (!isMounted) return;
+      
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        setUser(session?.user || null);
+        if (session?.user) {
+          const { data: userProfile } = await supabase
+            .from('user_profiles')
+            .select('*')
+            .eq('id', session.user.id)
+            .single();
+          setProfile(userProfile);
+        }
+        setLoading(false);
+      } else if (event === 'SIGNED_OUT' || event === 'USER_DELETED') {
         setUser(null);
         setProfile(null);
         setLoading(false);
@@ -64,8 +78,8 @@ export const AuthProvider = ({ children }) => {
     });
 
     return () => {
-      clearTimeout(timer);
-      authListener.subscription.unsubscribe();
+      isMounted = false;
+      if (authListener?.subscription) authListener.subscription.unsubscribe();
     };
   }, []);
 
@@ -75,32 +89,13 @@ export const AuthProvider = ({ children }) => {
     setUser(null);
     setProfile(null);
     setLoading(false);
-    window.location.href = '/';
   };
-
-  if (errorMsg) {
-    return (
-      <div className="min-h-screen bg-red-50 flex flex-col items-center justify-center p-6 text-center">
-        <AlertTriangle className="h-16 w-16 text-red-500 mb-4" />
-        <h2 className="text-xl font-bold text-red-800 mb-2">Ops, algo travou!</h2>
-        <p className="text-red-600 mb-8 max-w-sm">{errorMsg}</p>
-        
-        <button 
-          onClick={forceClearCache} 
-          className="flex items-center gap-2 px-6 py-3 bg-red-600 text-white rounded-xl font-medium hover:bg-red-700 shadow-md"
-        >
-          <RefreshCw className="w-5 h-5" />
-          Limpar Cache e Resolver
-        </button>
-      </div>
-    );
-  }
 
   if (loading) {
     return (
       <div className="min-h-screen bg-brand-50 flex flex-col items-center justify-center px-4 text-center">
         <Loader2 className="h-12 w-12 text-brand-600 animate-spin mb-4" />
-        <p className="text-brand-900 font-medium animate-pulse">Sincronizando FrotaApp...</p>
+        <p className="text-brand-900 font-medium animate-pulse">Autenticando...</p>
       </div>
     );
   }
