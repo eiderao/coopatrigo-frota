@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import Tesseract from 'tesseract.js';
+import imageCompression from 'browser-image-compression';
 import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus, Loader2 } from 'lucide-react';
 
 export default function CondutorHome() {
   const [isScanning, setIsScanning] = useState(false);
   const [isOcrLoading, setIsOcrLoading] = useState(false);
-  const [ocrProgress, setOcrProgress] = useState(0); // Novo: Progresso do OCR
+  const [ocrProgress, setOcrProgress] = useState(0);
   const [scanResult, setScanResult] = useState(null);
   const [resultType, setResultType] = useState('');
   const [cameraError, setCameraError] = useState('');
@@ -22,53 +23,7 @@ export default function CondutorHome() {
     };
   }, []);
 
-  // --- FUNÇÃO DE COMPRESSÃO DE IMAGEM (Evita Erro de Memória) ---
-  const compressImage = (file, maxWidth = 1200) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = (event) => {
-        const img = new Image();
-        img.src = event.target.result;
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          let width = img.width;
-          let height = img.height;
-
-          // Redimensiona mantendo a proporção
-          if (width > height) {
-            if (width > maxWidth) {
-              height = Math.round((height * maxWidth) / width);
-              width = maxWidth;
-            }
-          } else {
-            if (height > maxWidth) {
-              width = Math.round((width * maxWidth) / height);
-              height = maxWidth;
-            }
-          }
-
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0, width, height);
-
-          // Comprime para JPEG com 80% de qualidade
-          canvas.toBlob((blob) => {
-            const newFile = new File([blob], "compressed_image.jpg", {
-              type: 'image/jpeg',
-              lastModified: Date.now(),
-            });
-            resolve(newFile);
-          }, 'image/jpeg', 0.8);
-        };
-        img.onerror = (err) => reject(err);
-      };
-      reader.onerror = (err) => reject(err);
-    });
-  };
-
-  // --- MODO 1: CÂMERA AO VIVO ---
+  // --- MODO 1: CÂMERA AO VIVO OTIMIZADA ---
   const startScanner = async () => {
     setIsScanning(true);
     setScanResult(null);
@@ -82,14 +37,11 @@ export default function CondutorHome() {
         await html5QrCode.start(
           { facingMode: "environment" },
           {
-            fps: 10,
+            fps: 15,
+            formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ], // Foca 100% em QR Code (ignora código de barras)
             qrbox: (viewfinderWidth, viewfinderHeight) => {
-              const minEdgePercentage = 0.8;
               const minEdgeSize = Math.min(viewfinderWidth, viewfinderHeight);
-              return {
-                width: Math.floor(minEdgeSize * minEdgePercentage),
-                height: Math.floor(minEdgeSize * minEdgePercentage)
-              };
+              return { width: Math.floor(minEdgeSize * 0.8), height: Math.floor(minEdgeSize * 0.8) };
             },
             aspectRatio: 1.0
           },
@@ -98,10 +50,10 @@ export default function CondutorHome() {
             setResultType('URL');
             stopScanner(html5QrCode);
           },
-          () => {}
+          () => {} // Ignora falhas de frame
         );
       } catch (err) {
-        setCameraError('Não foi possível acessar a câmera. Use o botão de Câmera Nativa abaixo.');
+        setCameraError('Acesso à câmera negado ou indisponível. Use o botão de Câmera Nativa.');
         setIsScanning(false);
       }
     }, 100);
@@ -119,7 +71,7 @@ export default function CondutorHome() {
     setIsScanning(false);
   };
 
-  // --- MODO 2: UPLOAD COM COMPRESSÃO E OCR ---
+  // --- MODO 2: UPLOAD (COMPRESSÃO SEGURA + OCR COM TIMEOUT) ---
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -129,23 +81,31 @@ export default function CondutorHome() {
     setOcrProgress(0);
 
     try {
-      // 1. Comprime a imagem para não estourar a memória do celular
-      const compressedFile = await compressImage(file);
+      // 1. COMPRESSÃO SEGURA COM WEB WORKERS (Evita falta de memória)
+      const options = {
+        maxSizeMB: 0.5,
+        maxWidthOrHeight: 1200,
+        useWebWorker: true,
+        initialQuality: 0.8
+      };
+      
+      const compressedFile = await imageCompression(file, options);
 
-      // 2. Tenta achar o QR Code na imagem comprimida
+      // 2. TENTATIVA RÁPIDA DE ACHAR O QR CODE NA FOTO
       const html5QrCode = new Html5Qrcode("qr-reader-file");
       try {
         const decodedText = await html5QrCode.scanFile(compressedFile, true);
         setScanResult(decodedText);
         setResultType('URL');
         setIsOcrLoading(false);
-        return; // Sucesso, para aqui.
+        return; 
       } catch (qrErr) {
-        console.log("QR Code não encontrado, iniciando IA OCR...");
+        console.log("QR Code não legível, iniciando Inteligência Artificial...");
       }
 
-      // 3. Se QR falhar, roda o Tesseract para buscar a chave
-      const { data: { text } } = await Tesseract.recognize(
+      // 3. IA DE LEITURA (OCR) COM TRAVA DE TEMPO CONTRA LOOP INFINITO
+      // Se passar de 20 segundos, ele aborta forçadamente
+      const ocrPromise = Tesseract.recognize(
         compressedFile,
         'por',
         { 
@@ -157,6 +117,12 @@ export default function CondutorHome() {
         }
       );
 
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('TIMEOUT')), 20000)
+      );
+
+      const { data: { text } } = await Promise.race([ocrPromise, timeoutPromise]);
+
       const digitsOnly = text.replace(/\D/g, '');
       const match44 = digitsOnly.match(/\d{44}/);
 
@@ -164,14 +130,18 @@ export default function CondutorHome() {
         setScanResult(match44[0]);
         setResultType('CHAVE_44');
       } else {
-        setCameraError('Não localizamos QR Code ou Chave. Tente uma foto mais nítida.');
+        setCameraError('O cupom está muito amassado ou sem foco. Digite os 44 números manualmente.');
       }
     } catch (err) {
       console.error(err);
-      setCameraError('Erro ao processar imagem. Tente novamente.');
+      if (err.message === 'TIMEOUT') {
+        setCameraError('O celular demorou muito para processar a imagem e a operação foi cancelada. Tente novamente.');
+      } else {
+        setCameraError('Erro ao processar imagem. Tente tirar a foto com mais luz.');
+      }
     } finally {
       setIsOcrLoading(false);
-      e.target.value = '';
+      e.target.value = ''; // Limpa o input
     }
   };
 
@@ -185,12 +155,12 @@ export default function CondutorHome() {
     <div className="p-4 md:p-8 flex flex-col h-full max-w-lg mx-auto w-full">
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-gray-800">Registrar Despesa</h1>
-        <p className="text-gray-500 text-sm mt-1">Escaneie o QR Code da nota fiscal (NF-e) ou insira manualmente.</p>
+        <p className="text-gray-500 text-sm mt-1">Escaneie o QR Code ou insira a chave da Nota Fiscal.</p>
       </div>
 
       <div id="qr-reader-file" style={{ display: 'none' }}></div>
 
-      {/* ESTADO: CARREGANDO OCR COM PROGRESSO */}
+      {/* ESTADO DE CARREGAMENTO BLINDADO */}
       {isOcrLoading && (
         <div className="flex flex-col items-center justify-center p-8 bg-white rounded-2xl border border-gray-200 shadow-sm mb-6">
           <Loader2 className="w-12 h-12 text-brand-600 animate-spin mb-4" />
@@ -202,7 +172,7 @@ export default function CondutorHome() {
         </div>
       )}
 
-      {/* ESTADO: ERRO */}
+      {/* ERROS CLAROS PARA O USUÁRIO */}
       {cameraError && !isScanning && !scanResult && !isOcrLoading && (
         <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
@@ -215,17 +185,20 @@ export default function CondutorHome() {
         </div>
       )}
 
-      {/* ESTADO: CÂMERA AO VIVO */}
+      {/* CÂMERA AO VIVO */}
       {isScanning && !isOcrLoading && (
         <div className="flex flex-col items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-200">
+          <p className="text-sm text-brand-600 font-semibold mb-3 animate-pulse text-center">
+            Mantenha o QR Code no centro.
+          </p>
           <div id="qr-reader" className="w-full aspect-square max-w-sm rounded-lg overflow-hidden border-2 border-brand-500 mb-4 bg-black"></div>
           <button onClick={() => stopScanner()} className="w-full flex justify-center items-center gap-2 bg-red-50 text-red-600 py-4 rounded-xl font-medium hover:bg-red-100 transition">
-            <XCircle className="w-5 h-5" /> Cancelar Câmera
+            <XCircle className="w-5 h-5" /> Cancelar
           </button>
         </div>
       )}
 
-      {/* ESTADO: SUCESSO */}
+      {/* SUCESSO */}
       {scanResult && !isScanning && !isOcrLoading && (
         <div className="flex flex-col items-center bg-brand-50 p-6 rounded-2xl border border-brand-200 text-center shadow-sm">
           <CheckCircle2 className="w-16 h-16 text-brand-500 mb-4" />
@@ -239,7 +212,7 @@ export default function CondutorHome() {
             <p className="text-xs text-gray-500 font-mono break-all text-left">{scanResult}</p>
           </div>
           <div className="w-full space-y-3">
-            <button onClick={() => alert('Pronto para extrair dados da SEFAZ')} className="w-full bg-brand-600 text-white py-4 rounded-xl font-medium hover:bg-brand-700 transition shadow-sm">
+            <button onClick={() => alert('Chamar API SEFAZ...')} className="w-full bg-brand-600 text-white py-4 rounded-xl font-medium hover:bg-brand-700 transition shadow-sm">
               Continuar com esta Nota
             </button>
             <button onClick={resetProcess} className="w-full bg-white text-gray-600 border border-gray-300 py-3 rounded-xl font-medium hover:bg-gray-50 transition">
@@ -249,7 +222,7 @@ export default function CondutorHome() {
         </div>
       )}
 
-      {/* ESTADO: BOTÕES INICIAIS */}
+      {/* BOTÕES INICIAIS */}
       {!isScanning && !scanResult && !isOcrLoading && (
         <div className="flex flex-col gap-4 mt-2">
           <button onClick={startScanner} className="flex flex-col items-center justify-center gap-3 bg-brand-600 text-white py-8 rounded-2xl hover:bg-brand-700 transition shadow-md group">
