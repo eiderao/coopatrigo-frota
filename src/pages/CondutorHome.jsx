@@ -1,13 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useRef } from 'react';
+import { supabase } from '../lib/supabase';
+import { useAuth } from '../contexts/AuthContext';
+import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus, Loader2, ListTodo } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus, Loader2, Edit3 } from 'lucide-react';
 
 // ==========================================
-// SUBCOMPONENTE: CÂMERA BLINDADA
+// CÂMERA DIRETA (Para ler QR Code ao vivo, se ele quiser)
 // ==========================================
-// Este componente garante que a <div id="qr-reader"> já existe no DOM antes de ligar a câmera.
 const QRScanner = ({ onSuccess, onError, onCancel }) => {
-  useEffect(() => {
+  React.useEffect(() => {
     let isMounted = true;
     const scanner = new Html5Qrcode("qr-reader");
 
@@ -15,49 +16,28 @@ const QRScanner = ({ onSuccess, onError, onCancel }) => {
       try {
         await scanner.start(
           { facingMode: "environment" },
-          {
-            fps: 10,
-            formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
-            qrbox: { width: 220, height: 220 }, // Foco ideal
-            aspectRatio: 1.0
-          },
+          { fps: 10, formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE], qrbox: { width: 220, height: 220 }, aspectRatio: 1.0 },
           (decodedText) => {
-            if (isMounted) {
-              scanner.stop().then(() => onSuccess(decodedText)).catch(() => onSuccess(decodedText));
-            }
+            if (isMounted) scanner.stop().then(() => onSuccess(decodedText)).catch(() => onSuccess(decodedText));
           },
-          () => {} // ignora falhas de frame
+          () => {}
         );
       } catch (err) {
-        if (isMounted) {
-          console.error("Erro Câmera Principal:", err);
-          onError("Câmera bloqueada ou indisponível. Verifique as permissões do navegador.");
-        }
+        if (isMounted) onError("Câmera bloqueada. Verifique as permissões do navegador.");
       }
     };
-
     startCamera();
-
-    // Limpeza rigorosa ao fechar a câmera
     return () => {
       isMounted = false;
-      if (scanner.isScanning) {
-        scanner.stop().then(() => scanner.clear()).catch(() => {});
-      }
+      if (scanner.isScanning) scanner.stop().then(() => scanner.clear()).catch(() => {});
     };
   }, [onSuccess, onError]);
 
   return (
-    <div className="flex flex-col items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-100 w-full">
-      <p className="text-sm text-brand-600 font-semibold mb-3 text-center animate-pulse">
-        Aponte a câmera para o QR Code
-      </p>
-      {/* A div garantida no DOM */}
-      <div id="qr-reader" className="w-full aspect-square max-w-sm mb-4 bg-black rounded-xl overflow-hidden border-2 border-brand-500 min-h-[250px]"></div>
-      
-      <button onClick={onCancel} className="w-full flex justify-center items-center gap-2 py-4 bg-red-50 text-red-600 rounded-xl font-medium hover:bg-red-100 transition">
-        <XCircle className="w-5 h-5" /> Cancelar Câmera
-      </button>
+    <div className="flex flex-col items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-100 w-full animate-fade-in">
+      <p className="text-sm text-brand-600 font-semibold mb-3 text-center animate-pulse">Aponte para o QR Code</p>
+      <div id="qr-reader" className="w-full aspect-square max-w-sm mb-4 bg-black rounded-xl overflow-hidden min-h-[250px]"></div>
+      <button onClick={onCancel} className="w-full py-4 bg-red-50 text-red-600 rounded-xl font-medium">Cancelar Câmera</button>
     </div>
   );
 };
@@ -66,208 +46,163 @@ const QRScanner = ({ onSuccess, onError, onCancel }) => {
 // COMPONENTE PRINCIPAL
 // ==========================================
 export default function CondutorHome() {
-  const [view, setView] = useState('HOME'); // 'HOME', 'SCANNER', 'MANUAL', 'SUCCESS', 'LOADING'
-  const [scanResult, setScanResult] = useState(null);
-  const [cameraError, setCameraError] = useState('');
-  
-  const [formData, setFormData] = useState({
-    odometer: '', fuelType: 'Gasolina', liters: '', pricePerLiter: '', totalValue: ''
-  });
-
+  const { user, profile } = useAuth();
+  const [view, setView] = useState('HOME'); // HOME, SCANNER, UPLOADING, SUCCESS
+  const [errorMsg, setErrorMsg] = useState('');
   const fileInputRef = useRef(null);
 
-  // --- INTERCEPTADOR DO BOTÃO VOLTAR DO CELULAR (ANTI-LOOP) ---
-  useEffect(() => {
-    // Adiciona um estado falso no histórico para prender o usuário nesta tela com segurança
-    window.history.pushState({ noBack: true }, '');
-
-    const handlePopState = (e) => {
-      // Se ele apertar voltar e estiver na câmera ou manual, volta pra HOME em vez de dar loop
-      if (view !== 'HOME') {
-        setView('HOME');
-        window.history.pushState({ noBack: true }, ''); // Restaura a trava
-      } else {
-        // Se estiver na HOME, mantém ele aqui e impede o navegador de ir pro Login
-        window.history.pushState({ noBack: true }, '');
-      }
-    };
-
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, [view]);
-
-  // --- REDIMENSIONADOR NATIVO ---
-  const resizeImage = (file, maxEdge = 1000) => {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      const objectUrl = URL.createObjectURL(file);
-      img.src = objectUrl;
-      
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        let { width, height } = img;
-
-        if (width > height && width > maxEdge) {
-          height *= maxEdge / width; width = maxEdge;
-        } else if (height > maxEdge) {
-          width *= maxEdge / height; height = maxEdge;
-        }
-
-        canvas.width = width; canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
-        
-        canvas.toBlob((blob) => {
-          URL.revokeObjectURL(objectUrl); 
-          resolve(new File([blob], "foto_leve.jpg", { type: 'image/jpeg' }));
-        }, 'image/jpeg', 0.8);
-      };
-      img.onerror = reject;
-    });
-  };
-
+  // --- O NOVO FLUXO: UPLOAD DIRETO PARA A NUVEM (Zero Memória RAM) ---
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    setView('LOADING');
-    setCameraError('');
+    setView('UPLOADING');
+    setErrorMsg('');
 
     try {
-      const leveFile = await resizeImage(file);
-      const html5QrCode = new Html5Qrcode("qr-reader-file"); // Div oculta lá embaixo
-      
-      try {
-        const decodedText = await html5QrCode.scanFile(leveFile, true);
-        setScanResult({ type: 'QR_LINK', value: decodedText });
-        setView('SUCCESS');
-      } catch (qrErr) {
-        // Mock envio pra nuvem
-        setTimeout(() => {
-          setScanResult({ type: 'PHOTO_UPLOAD', value: leveFile });
-          setView('SUCCESS');
-        }, 800);
-      }
+      // 1. Cria um nome único para o arquivo usando a data atual e o ID do usuário
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
+      const filePath = `${user.id}/${fileName}`;
+
+      // 2. Faz o upload direto via streaming para o Supabase Storage (Não trava a memória!)
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('receipts')
+        .upload(filePath, file);
+
+      if (uploadError) throw uploadError;
+
+      // 3. Pega a URL pública/assinada da foto
+      const { data: { publicUrl } } = supabase.storage.from('receipts').getPublicUrl(filePath);
+
+      // 4. Cria a despesa como "Pendente de Revisão" no banco de dados
+      const { error: dbError } = await supabase.from('expenses').insert({
+        "tenantId": profile.tenantId,
+        driver_id: user.id,
+        expense_type: 'abastecimento', // padrão inicial
+        total_value: 0, // A ser preenchido pela IA ou usuário depois
+        odometer: 0,
+        status: 'pendente_processamento', // Status crucial para a aba de prestação de contas
+        receipt_url: publicUrl,
+        data_source: 'upload'
+      });
+
+      if (dbError) throw dbError;
+
+      setView('SUCCESS');
     } catch (err) {
-      setCameraError('Erro ao processar imagem. Use a digitação manual.');
+      console.error("Erro no Upload:", err);
+      setErrorMsg('Falha ao enviar o comprovante. Verifique sua conexão com a internet.');
       setView('HOME');
     } finally {
-      e.target.value = ''; 
+      e.target.value = ''; // Limpa o input
     }
   };
 
-  const handleManualSubmit = (e) => {
-    e.preventDefault();
-    setScanResult({ type: 'MANUAL_DATA', value: formData });
-    setView('SUCCESS');
+  // Simula o registro instantâneo se ele ler pelo QR Code direto
+  const handleQRSuccess = async (qrText) => {
+    setView('UPLOADING');
+    try {
+      await supabase.from('expenses').insert({
+        "tenantId": profile.tenantId,
+        driver_id: user.id,
+        expense_type: 'abastecimento',
+        total_value: 0,
+        odometer: 0,
+        status: 'pendente_processamento',
+        nfe_key: qrText, // Salva o texto do QR Code
+        data_source: 'qrcode'
+      });
+      setView('SUCCESS');
+    } catch (err) {
+      setErrorMsg('Erro ao salvar leitura.');
+      setView('HOME');
+    }
   };
 
   return (
     <div className="p-4 md:p-8 flex flex-col h-full max-w-lg mx-auto w-full">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-800">Registrar Despesa</h1>
+      <div className="mb-6 flex justify-between items-center">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-800">Nova Despesa</h1>
+          <p className="text-gray-500 text-sm mt-1">Guarde seus comprovantes na nuvem.</p>
+        </div>
+        
+        {/* NOVO: Botão para ir para a Prestação de Contas */}
+        {view === 'HOME' && (
+          <button onClick={() => alert('Em breve: Lista de Prestações Pendentes')} className="p-3 bg-brand-50 text-brand-700 rounded-full hover:bg-brand-100 transition shadow-sm">
+            <ListTodo className="w-6 h-6" />
+          </button>
+        )}
       </div>
 
-      <div id="qr-reader-file" style={{ display: 'none' }}></div>
-
-      {cameraError && view === 'HOME' && (
-        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl flex gap-3 shadow-sm">
-          <AlertCircle className="w-5 h-5 shrink-0" />
-          <p className="text-sm font-medium">{cameraError}</p>
+      {errorMsg && view === 'HOME' && (
+        <div className="mb-6 p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-start gap-3 shadow-sm">
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <p className="text-sm font-medium">{errorMsg}</p>
         </div>
       )}
 
-      {view === 'LOADING' && (
-        <div className="flex flex-col items-center justify-center p-10 bg-white rounded-2xl shadow-sm border border-gray-100">
+      {/* --- ESTADO: ENVIANDO PARA A NUVEM --- */}
+      {view === 'UPLOADING' && (
+        <div className="flex flex-col items-center justify-center p-10 bg-white rounded-2xl shadow-sm border border-gray-100 mt-4">
           <Loader2 className="w-12 h-12 text-brand-600 animate-spin mb-4" />
-          <h3 className="text-lg font-bold">Processando...</h3>
+          <h3 className="text-lg font-bold">Salvando Comprovante...</h3>
+          <p className="text-sm text-gray-500 mt-2 text-center">Enviando com segurança para a nuvem.</p>
         </div>
       )}
 
-      {/* RENDERIZAÇÃO SEGURA DO SCANNER */}
+      {/* --- ESTADO: SCANNER AO VIVO --- */}
       {view === 'SCANNER' && (
         <QRScanner 
-          onSuccess={(text) => {
-            setScanResult({ type: 'QR_LINK', value: text });
-            setView('SUCCESS');
-          }}
-          onError={(err) => {
-            setCameraError(err);
-            setView('HOME');
-          }}
+          onSuccess={handleQRSuccess}
+          onError={(err) => { setErrorMsg(err); setView('HOME'); }}
           onCancel={() => setView('HOME')}
         />
       )}
 
-      {view === 'MANUAL' && (
-        <form onSubmit={handleManualSubmit} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 animate-fade-in">
-          <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Edit3 className="w-5 h-5 text-brand-600"/> Dados Manuais</h3>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-semibold mb-1">Km do Veículo</label>
-              <input type="number" required value={formData.odometer} onChange={(e) => setFormData({...formData, odometer: e.target.value})} className="w-full p-3 border rounded-lg" />
-            </div>
-            <div>
-              <label className="block text-sm font-semibold mb-1">Combustível</label>
-              <select value={formData.fuelType} onChange={(e) => setFormData({...formData, fuelType: e.target.value})} className="w-full p-3 border rounded-lg bg-white">
-                <option value="Gasolina">Gasolina</option>
-                <option value="Etanol">Etanol</option>
-                <option value="Diesel">Diesel</option>
-              </select>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-semibold mb-1">Litros</label>
-                <input type="number" step="0.01" required value={formData.liters} onChange={(e) => setFormData({...formData, liters: e.target.value})} className="w-full p-3 border rounded-lg" />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold mb-1">Valor Unit.</label>
-                <input type="number" step="0.01" required value={formData.pricePerLiter} onChange={(e) => setFormData({...formData, pricePerLiter: e.target.value})} className="w-full p-3 border rounded-lg" />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-semibold mb-1">Valor Total (R$)</label>
-              <input type="number" step="0.01" required value={formData.totalValue} onChange={(e) => setFormData({...formData, totalValue: e.target.value})} className="w-full p-3 border rounded-lg font-bold" />
-            </div>
-          </div>
-          <div className="flex gap-3 mt-6">
-            <button type="button" onClick={() => setView('HOME')} className="flex-1 py-3 bg-gray-100 rounded-xl font-medium">Cancelar</button>
-            <button type="submit" className="flex-1 py-3 bg-brand-600 text-white rounded-xl font-medium">Revisar</button>
-          </div>
-        </form>
-      )}
-
-      {view === 'SUCCESS' && scanResult && (
-        <div className="bg-brand-50 p-6 rounded-2xl text-center shadow-sm">
-          <CheckCircle2 className="w-16 h-16 text-brand-500 mb-4 mx-auto" />
-          <h2 className="text-xl font-bold mb-4">Dados Registrados!</h2>
+      {/* --- ESTADO: SUCESSO --- */}
+      {view === 'SUCCESS' && (
+        <div className="bg-brand-50 p-8 rounded-2xl text-center shadow-sm animate-fade-in">
+          <CheckCircle2 className="w-20 h-20 text-brand-500 mb-4 mx-auto" />
+          <h2 className="text-2xl font-bold text-brand-900 mb-2">Salvo na Nuvem!</h2>
+          <p className="text-brand-700 mb-8">Seu comprovante foi guardado com segurança.</p>
           
-          <div className="bg-white p-3 rounded-lg border w-full mb-6">
-            {scanResult.type === 'QR_LINK' && <p className="text-xs text-gray-500 font-mono break-all">{scanResult.value}</p>}
-            {scanResult.type === 'PHOTO_UPLOAD' && <p className="text-sm font-medium">Foto otimizada.</p>}
-            {scanResult.type === 'MANUAL_DATA' && <p className="text-sm font-bold text-brand-700">R$ {scanResult.value.totalValue}</p>}
-          </div>
-
-          <button onClick={() => { setScanResult(null); setView('HOME'); }} className="w-full bg-white border py-3 rounded-xl font-medium">
-            Nova Leitura
+          <button onClick={() => setView('HOME')} className="w-full bg-brand-600 text-white py-4 rounded-xl font-bold shadow-md hover:bg-brand-700 transition mb-3">
+            Registrar Novo Comprovante
+          </button>
+          
+          <button onClick={() => alert('Em breve: Ir para a revisão manual de dados')} className="w-full bg-white text-gray-700 border border-gray-300 py-3 rounded-xl font-medium">
+            Fazer Prestação de Contas
           </button>
         </div>
       )}
 
+      {/* --- ESTADO: HOME --- */}
       {view === 'HOME' && (
         <div className="flex flex-col gap-4 mt-2">
-          <button onClick={() => setView('SCANNER')} className="flex gap-3 items-center justify-center bg-brand-600 text-white py-6 rounded-2xl font-semibold shadow-md">
-            <Camera className="w-6 h-6" /> Câmera ao Vivo
+          
+          {/* BOTÃO PRINCIPAL: CÂMERA NATIVA (Abre direto a câmera do celular com qualidade máxima) */}
+          <input type="file" accept="image/*" capture="environment" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+          <button onClick={() => fileInputRef.current.click()} className="flex gap-4 items-center justify-center bg-brand-600 text-white py-8 rounded-2xl font-semibold shadow-md group">
+            <Camera className="w-8 h-8 group-hover:scale-110 transition-transform" /> 
+            <span className="text-xl">Tirar Foto do Cupom</span>
           </button>
-          
-          <input type="file" accept="image/*" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-          
-          <button onClick={() => fileInputRef.current.click()} className="flex gap-3 items-center justify-center bg-brand-50 text-brand-700 py-4 rounded-xl font-medium border border-brand-200">
-            <ImagePlus className="w-5 h-5" /> Enviar Foto da Galeria
+
+          {/* BOTÃO SECUNDÁRIO: GALERIA / PDF */}
+          <input type="file" accept="image/*,.pdf" id="gallery-upload" onChange={handleFileUpload} className="hidden" />
+          <button onClick={() => document.getElementById('gallery-upload').click()} className="flex gap-3 items-center justify-center bg-white border border-gray-300 py-4 rounded-xl font-medium shadow-sm">
+            <ImagePlus className="w-5 h-5 text-gray-500" /> Buscar da Galeria ou Arquivo
           </button>
-          
-          <button onClick={() => setView('MANUAL')} className="flex gap-3 items-center justify-center bg-white border border-gray-300 py-4 rounded-xl font-medium">
-            <Edit3 className="w-5 h-5" /> Inserir Manualmente
+
+          <div className="relative flex items-center py-2">
+            <div className="flex-grow border-t border-gray-200"></div>
+            <span className="flex-shrink-0 mx-4 text-gray-400 text-sm font-medium">OU</span>
+            <div className="flex-grow border-t border-gray-200"></div>
+          </div>
+
+          <button onClick={() => setView('SCANNER')} className="flex gap-3 items-center justify-center bg-brand-50 text-brand-700 border border-brand-200 py-4 rounded-xl font-medium shadow-sm">
+            <CheckCircle2 className="w-5 h-5" /> Ler QR Code ao Vivo (Câmera Rápida)
           </button>
         </div>
       )}
