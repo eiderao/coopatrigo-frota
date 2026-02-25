@@ -2,8 +2,71 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { Camera, XCircle, CheckCircle2, FileText, AlertCircle, ImagePlus, Loader2, Edit3 } from 'lucide-react';
 
+// ==========================================
+// SUBCOMPONENTE: CÂMERA BLINDADA
+// ==========================================
+// Este componente garante que a <div id="qr-reader"> já existe no DOM antes de ligar a câmera.
+const QRScanner = ({ onSuccess, onError, onCancel }) => {
+  useEffect(() => {
+    let isMounted = true;
+    const scanner = new Html5Qrcode("qr-reader");
+
+    const startCamera = async () => {
+      try {
+        await scanner.start(
+          { facingMode: "environment" },
+          {
+            fps: 10,
+            formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
+            qrbox: { width: 220, height: 220 }, // Foco ideal
+            aspectRatio: 1.0
+          },
+          (decodedText) => {
+            if (isMounted) {
+              scanner.stop().then(() => onSuccess(decodedText)).catch(() => onSuccess(decodedText));
+            }
+          },
+          () => {} // ignora falhas de frame
+        );
+      } catch (err) {
+        if (isMounted) {
+          console.error("Erro Câmera Principal:", err);
+          onError("Câmera bloqueada ou indisponível. Verifique as permissões do navegador.");
+        }
+      }
+    };
+
+    startCamera();
+
+    // Limpeza rigorosa ao fechar a câmera
+    return () => {
+      isMounted = false;
+      if (scanner.isScanning) {
+        scanner.stop().then(() => scanner.clear()).catch(() => {});
+      }
+    };
+  }, [onSuccess, onError]);
+
+  return (
+    <div className="flex flex-col items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-100 w-full">
+      <p className="text-sm text-brand-600 font-semibold mb-3 text-center animate-pulse">
+        Aponte a câmera para o QR Code
+      </p>
+      {/* A div garantida no DOM */}
+      <div id="qr-reader" className="w-full aspect-square max-w-sm mb-4 bg-black rounded-xl overflow-hidden border-2 border-brand-500 min-h-[250px]"></div>
+      
+      <button onClick={onCancel} className="w-full flex justify-center items-center gap-2 py-4 bg-red-50 text-red-600 rounded-xl font-medium hover:bg-red-100 transition">
+        <XCircle className="w-5 h-5" /> Cancelar Câmera
+      </button>
+    </div>
+  );
+};
+
+// ==========================================
+// COMPONENTE PRINCIPAL
+// ==========================================
 export default function CondutorHome() {
-  const [view, setView] = useState('HOME');
+  const [view, setView] = useState('HOME'); // 'HOME', 'SCANNER', 'MANUAL', 'SUCCESS', 'LOADING'
   const [scanResult, setScanResult] = useState(null);
   const [cameraError, setCameraError] = useState('');
   
@@ -11,14 +74,29 @@ export default function CondutorHome() {
     odometer: '', fuelType: 'Gasolina', liters: '', pricePerLiter: '', totalValue: ''
   });
 
-  const scannerRef = useRef(null);
   const fileInputRef = useRef(null);
 
+  // --- INTERCEPTADOR DO BOTÃO VOLTAR DO CELULAR (ANTI-LOOP) ---
   useEffect(() => {
-    return () => stopScanner();
-  }, []);
+    // Adiciona um estado falso no histórico para prender o usuário nesta tela com segurança
+    window.history.pushState({ noBack: true }, '');
 
-  // --- CORREÇÃO OOM (ERRO DE MEMÓRIA) ---
+    const handlePopState = (e) => {
+      // Se ele apertar voltar e estiver na câmera ou manual, volta pra HOME em vez de dar loop
+      if (view !== 'HOME') {
+        setView('HOME');
+        window.history.pushState({ noBack: true }, ''); // Restaura a trava
+      } else {
+        // Se estiver na HOME, mantém ele aqui e impede o navegador de ir pro Login
+        window.history.pushState({ noBack: true }, '');
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [view]);
+
+  // --- REDIMENSIONADOR NATIVO ---
   const resizeImage = (file, maxEdge = 1000) => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -40,59 +118,12 @@ export default function CondutorHome() {
         ctx.drawImage(img, 0, 0, width, height);
         
         canvas.toBlob((blob) => {
-          URL.revokeObjectURL(objectUrl); // <--- O SEGREDO PRA NÃO TRAVAR A RAM DO CELULAR
+          URL.revokeObjectURL(objectUrl); 
           resolve(new File([blob], "foto_leve.jpg", { type: 'image/jpeg' }));
         }, 'image/jpeg', 0.8);
       };
       img.onerror = reject;
     });
-  };
-
-  const startScanner = async () => {
-    setView('SCANNER');
-    setCameraError('');
-
-    try {
-      const html5QrCode = new Html5Qrcode("qr-reader");
-      scannerRef.current = html5QrCode;
-
-      await html5QrCode.start(
-        { facingMode: "environment" }, // Tenta câmera traseira primeiro
-        {
-          fps: 10,
-          formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ],
-          qrbox: { width: 200, height: 200 }, // Foco ideal para os 2,3cm
-          aspectRatio: 1.0
-        },
-        (decodedText) => {
-          setScanResult({ type: 'QR_LINK', value: decodedText });
-          stopScanner();
-          setView('SUCCESS');
-        },
-        () => {} 
-      );
-    } catch (err) {
-      console.warn("Câmera traseira falhou. Tentando abrir qualquer câmera...", err);
-      try {
-        // Fallback: Se "environment" der erro, abre a primeira câmera que achar
-        await scannerRef.current.start(
-          { deviceId: { exact: undefined } }, 
-          { fps: 10, qrbox: { width: 200, height: 200 } },
-          (decoded) => { setScanResult({ type: 'QR_LINK', value: decoded }); stopScanner(); setView('SUCCESS'); },
-          () => {}
-        );
-      } catch (fallbackErr) {
-        setCameraError('Permissão negada ou câmera indisponível. Verifique as configurações do navegador.');
-        stopScanner();
-        setView('HOME');
-      }
-    }
-  };
-
-  const stopScanner = async () => {
-    if (scannerRef.current) {
-      try { await scannerRef.current.stop(); scannerRef.current.clear(); scannerRef.current = null; } catch (err) {}
-    }
   };
 
   const handleFileUpload = async (e) => {
@@ -103,21 +134,22 @@ export default function CondutorHome() {
     setCameraError('');
 
     try {
-      const leveFile = await resizeImage(file); // Não trava mais a RAM
-      const html5QrCode = new Html5Qrcode("qr-reader-file");
+      const leveFile = await resizeImage(file);
+      const html5QrCode = new Html5Qrcode("qr-reader-file"); // Div oculta lá embaixo
       
       try {
         const decodedText = await html5QrCode.scanFile(leveFile, true);
         setScanResult({ type: 'QR_LINK', value: decodedText });
         setView('SUCCESS');
-        return;
       } catch (qrErr) {
-        // Se a foto não for lida, vamos simular o envio pra API que faremos a seguir.
-        setScanResult({ type: 'PHOTO_UPLOAD', value: leveFile });
-        setView('SUCCESS');
+        // Mock envio pra nuvem
+        setTimeout(() => {
+          setScanResult({ type: 'PHOTO_UPLOAD', value: leveFile });
+          setView('SUCCESS');
+        }, 800);
       }
     } catch (err) {
-      setCameraError('Erro ao processar a imagem. Insira os dados manualmente.');
+      setCameraError('Erro ao processar imagem. Use a digitação manual.');
       setView('HOME');
     } finally {
       e.target.value = ''; 
@@ -139,30 +171,37 @@ export default function CondutorHome() {
       <div id="qr-reader-file" style={{ display: 'none' }}></div>
 
       {cameraError && view === 'HOME' && (
-        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl flex gap-3">
+        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl flex gap-3 shadow-sm">
           <AlertCircle className="w-5 h-5 shrink-0" />
           <p className="text-sm font-medium">{cameraError}</p>
         </div>
       )}
 
       {view === 'LOADING' && (
-        <div className="flex flex-col items-center justify-center p-10 bg-white rounded-2xl shadow-sm mt-4 border border-gray-100">
+        <div className="flex flex-col items-center justify-center p-10 bg-white rounded-2xl shadow-sm border border-gray-100">
           <Loader2 className="w-12 h-12 text-brand-600 animate-spin mb-4" />
-          <h3 className="text-lg font-bold">Otimizando Imagem...</h3>
+          <h3 className="text-lg font-bold">Processando...</h3>
         </div>
       )}
 
+      {/* RENDERIZAÇÃO SEGURA DO SCANNER */}
       {view === 'SCANNER' && (
-        <div className="flex flex-col items-center bg-white p-4 rounded-2xl shadow-sm border border-gray-100">
-          <div id="qr-reader" className="w-full aspect-square max-w-sm mb-4 bg-black rounded-xl overflow-hidden"></div>
-          <button onClick={() => { stopScanner(); setView('HOME'); }} className="w-full py-4 bg-red-50 text-red-600 rounded-xl font-medium">
-            Cancelar Câmera
-          </button>
-        </div>
+        <QRScanner 
+          onSuccess={(text) => {
+            setScanResult({ type: 'QR_LINK', value: text });
+            setView('SUCCESS');
+          }}
+          onError={(err) => {
+            setCameraError(err);
+            setView('HOME');
+          }}
+          onCancel={() => setView('HOME')}
+        />
       )}
 
       {view === 'MANUAL' && (
-        <form onSubmit={handleManualSubmit} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+        <form onSubmit={handleManualSubmit} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 animate-fade-in">
+          <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Edit3 className="w-5 h-5 text-brand-600"/> Dados Manuais</h3>
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-semibold mb-1">Km do Veículo</label>
@@ -201,22 +240,32 @@ export default function CondutorHome() {
       {view === 'SUCCESS' && scanResult && (
         <div className="bg-brand-50 p-6 rounded-2xl text-center shadow-sm">
           <CheckCircle2 className="w-16 h-16 text-brand-500 mb-4 mx-auto" />
-          <h2 className="text-xl font-bold mb-4">Sucesso!</h2>
+          <h2 className="text-xl font-bold mb-4">Dados Registrados!</h2>
+          
+          <div className="bg-white p-3 rounded-lg border w-full mb-6">
+            {scanResult.type === 'QR_LINK' && <p className="text-xs text-gray-500 font-mono break-all">{scanResult.value}</p>}
+            {scanResult.type === 'PHOTO_UPLOAD' && <p className="text-sm font-medium">Foto otimizada.</p>}
+            {scanResult.type === 'MANUAL_DATA' && <p className="text-sm font-bold text-brand-700">R$ {scanResult.value.totalValue}</p>}
+          </div>
+
           <button onClick={() => { setScanResult(null); setView('HOME'); }} className="w-full bg-white border py-3 rounded-xl font-medium">
-            Voltar ao Início
+            Nova Leitura
           </button>
         </div>
       )}
 
       {view === 'HOME' && (
         <div className="flex flex-col gap-4 mt-2">
-          <button onClick={startScanner} className="flex gap-3 items-center justify-center bg-brand-600 text-white py-6 rounded-2xl font-semibold">
+          <button onClick={() => setView('SCANNER')} className="flex gap-3 items-center justify-center bg-brand-600 text-white py-6 rounded-2xl font-semibold shadow-md">
             <Camera className="w-6 h-6" /> Câmera ao Vivo
           </button>
+          
           <input type="file" accept="image/*" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+          
           <button onClick={() => fileInputRef.current.click()} className="flex gap-3 items-center justify-center bg-brand-50 text-brand-700 py-4 rounded-xl font-medium border border-brand-200">
             <ImagePlus className="w-5 h-5" /> Enviar Foto da Galeria
           </button>
+          
           <button onClick={() => setView('MANUAL')} className="flex gap-3 items-center justify-center bg-white border border-gray-300 py-4 rounded-xl font-medium">
             <Edit3 className="w-5 h-5" /> Inserir Manualmente
           </button>
